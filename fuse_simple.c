@@ -21,10 +21,11 @@
 
 //please dont have a long ass path
 int PATH_MAX = 500;
-struct root_dir{
+struct context{
     char *rootdir;
+    char passphrase[256];
 };
-#define ROOT_DIR ((struct root_dir *) fuse_get_context()->private_data)
+#define ROOT_DIR ((struct context *) fuse_get_context()->private_data)
 
 
 
@@ -327,22 +328,40 @@ static struct fuse_operations xmp_oper = {
 
 int main(int argc, char *argv[])
 {
-    //something to store rootdir
-    struct root_dir *root_directory;
+    struct context *context;
+    char passphrase[256];
 
-    if ((argc < 3) || (argv[argc-2][0] == '-') || (argv[argc-1][0] == '-')){
-        perror("invalid args");
+    if ((argc < 3) || (argv[argc-2][0] == '-') || (argv[argc-1][0] == '-')) {
+        fprintf(stderr, "Usage: %s [FUSE options] rootDir mountPoint\n", argv[0]);
+        return 1;
     }
 
-    root_directory = malloc(sizeof(struct root_dir));
+    // Ask for passphrase
+    printf("Enter passphrase: ");
+    if (fgets(passphrase, sizeof(passphrase), stdin) == NULL) {
+        perror("Failed to read passphrase");
+        return 1;
+    }
 
-    root_directory->rootdir = realpath(argv[argc-2], NULL);
-    printf("ROOT: %s", root_directory->rootdir);
+    // Remove trailing newline
+    size_t len = strlen(passphrase);
+    if (len > 0 && passphrase[len-1] == '\n')
+        passphrase[len-1] = '\0';
+
+    context = malloc(sizeof(struct context));
+    if (!context) {
+        perror("Failed to allocate memory");
+        return 1;
+    }
+
+    context->rootdir = realpath(argv[argc-2], NULL);
+    strncpy(context->passphrase, passphrase, sizeof(context->passphrase) - 1);
+    
+    printf("ROOT: %s\n", context->rootdir);
     argv[argc-2] = argv[argc-1];
     argv[argc-1] = NULL;
     argc--;
 
     umask(0);
-    //gotta pass in the root dir struct for the fuse to keep track of root directory
-    return fuse_main(argc, argv, &xmp_oper, root_directory);
+    return fuse_main(argc, argv, &xmp_oper, context);
 }
