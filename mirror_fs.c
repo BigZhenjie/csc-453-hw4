@@ -44,7 +44,49 @@ static void fullpath(char fpath[PATH_MAX], const char *path)
                     // break here
 }
 
+// Store IV in a separate metadata file
+static void store_file_iv(const char *path, unsigned char *iv) {
+    char meta_path[PATH_MAX + 8];
+    snprintf(meta_path, sizeof(meta_path), "%s.iv", path);
+    
+    FILE *meta_file = fopen(meta_path, "wb");
+    if (meta_file) {
+        fwrite(iv, 1, 16, meta_file);
+        fclose(meta_file);
+    }
+}
 
+// Get IV from metadata file
+static int get_file_iv(const char *path, unsigned char *iv) {
+    char meta_path[PATH_MAX + 8];
+    snprintf(meta_path, sizeof(meta_path), "%s.iv", path);
+    
+    FILE *meta_file = fopen(meta_path, "rb");
+    if (!meta_file) {
+        // If no IV file exists, file is not encrypted
+        return 0;
+    }
+    
+    size_t read_size = fread(iv, 1, 16, meta_file);
+    fclose(meta_file);
+    
+    return (read_size == 16);
+}
+
+// Determine if a file should be encrypted
+// In this implementation, we'll encrypt everything except .iv files
+static int should_encrypt_file(const char *path) {
+    size_t len = strlen(path);
+    if (len > 3 && strcmp(path + len - 3, ".iv") == 0)
+        return 0;  // Don't encrypt IV files
+    return 1;  // Encrypt everything else
+}
+
+// Check if a file is already encrypted
+static int is_encrypted_file(const char *path) {
+    unsigned char test_iv[16];
+    return get_file_iv(path, test_iv);
+}
 
 //need this
 static int xmp_getattr(const char *path, struct stat *stbuf)
