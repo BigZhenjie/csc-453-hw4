@@ -18,15 +18,22 @@
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
+#include <openssl/evp.h>
+#include <openssl/aes.h>
+#include <openssl/rand.h>
+#include "aes.h"
 
 //please dont have a long ass path
 int PATH_MAX = 500;
 struct context{
     char *rootdir;
     char passphrase[256];
-    unsigned char *key;
+    unsigned char key[32];
+    unsigned char iv[16];
 };
 #define ROOT_DIR ((struct context *) fuse_get_context()->private_data)
+
+
 
 
 
@@ -36,6 +43,8 @@ static void fullpath(char fpath[PATH_MAX], const char *path)
     strncat(fpath, path, PATH_MAX); // ridiculously long paths will
                     // break here
 }
+
+
 
 //need this
 static int xmp_getattr(const char *path, struct stat *stbuf)
