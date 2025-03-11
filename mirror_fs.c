@@ -773,14 +773,19 @@ static int xmp_unlink(const char *path)
 {
     int res;
     char fpath[PATH_MAX_LENGTH];
+    char iv_path[PATH_MAX_LENGTH + 8];
     fullpath(fpath, path);
 
     res = unlink(fpath);
     if (res == -1)
         return -errno;
 
+    // Also remove the IV file if it exists
+    snprintf(iv_path, sizeof(iv_path), "%s.iv", fpath);
+    unlink(iv_path); // Ignore errors - main operation succeeded
+
     return 0;
-};
+}
 
 static int xmp_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
