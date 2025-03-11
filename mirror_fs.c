@@ -22,6 +22,10 @@
 #include <openssl/aes.h>
 #include <openssl/rand.h>
 #include "aes.h"
+//TODO:
+//1. when renaming file, also need to rename the .iv file
+//2. when truncating, need to make sure if .iv file exists, then operate accodingly
+
 
 // please dont have a long ass path
 int PATH_MAX_LENGTH = 500;
@@ -169,13 +173,27 @@ static int xmp_rename(const char *from, const char *to)
     int res;
     char fpath_from[PATH_MAX_LENGTH];
     char fpath_to[PATH_MAX_LENGTH];
+    char iv_path_from[PATH_MAX_LENGTH + 8];
+    char iv_path_to[PATH_MAX_LENGTH + 8];
 
     fullpath(fpath_from, from);
     fullpath(fpath_to, to);
 
+    // First rename the main file
     res = rename(fpath_from, fpath_to);
     if (res == -1)
         return -errno;
+
+    // Check if there's an IV file for this file (meaning it's encrypted)
+    snprintf(iv_path_from, sizeof(iv_path_from), "%s.iv", fpath_from);
+    snprintf(iv_path_to, sizeof(iv_path_to), "%s.iv", fpath_to);
+
+    // Try to rename the IV file if it exists
+    // We don't return an error if this fails - the primary operation succeeded
+    if (access(iv_path_from, F_OK) == 0)
+    {
+        rename(iv_path_from, iv_path_to);
+    }
 
     return 0;
 }
@@ -337,76 +355,223 @@ static int xmp_write(const char *path, const char *buf, size_t size,
     char fpath[PATH_MAX_LENGTH];
     fullpath(fpath, path);
 
-    // Check if we should encrypt this file
-    if (should_encrypt_file(fpath))
+    // First, check if the file already has an IV (is already encrypted)
+    int is_encrypted = is_encrypted_file(fpath);
+
+    // Only perform encryption if the file is already encrypted
+    if (is_encrypted)
     {
-        // Create a unique IV for this file if it doesn't exist
         unsigned char iv[16];
-        if (!is_encrypted_file(fpath))
+        get_file_iv(fpath, iv);
+
+        // Check if this is an append operation (O_APPEND flag)
+        int is_append = fi && (fi->flags & O_APPEND);
+
+        // For append operations on encrypted files, we need special handling
+        if (is_append)
         {
-            RAND_bytes(iv, 16);
-            store_file_iv(fpath, iv);
+            // Read the entire file, decrypt, append, re-encrypt
+            struct stat st;
+            if (lstat(fpath, &st) == -1)
+                return -errno;
+
+            // Read current content
+            unsigned char *encrypted_content = malloc(st.st_size);
+            if (!encrypted_content)
+                return -ENOMEM;
+
+            fd = open(fpath, O_RDONLY);
+            if (fd == -1)
+            {
+                free(encrypted_content);
+                return -errno;
+            }
+
+            ssize_t bytes_read = read(fd, encrypted_content, st.st_size);
+            close(fd);
+
+            if (bytes_read != st.st_size)
+            {
+                free(encrypted_content);
+                return -EIO;
+            }
+
+            // Decrypt content
+            FILE *temp_in = tmpfile();
+            FILE *temp_out = tmpfile();
+
+            if (!temp_in || !temp_out)
+            {
+                free(encrypted_content);
+                if (temp_in)
+                    fclose(temp_in);
+                if (temp_out)
+                    fclose(temp_out);
+                return -EIO;
+            }
+
+            fwrite(encrypted_content, 1, bytes_read, temp_in);
+            rewind(temp_in);
+            free(encrypted_content);
+
+            if (!decrypt_file(temp_in, temp_out, ROOT_DIR->passphrase))
+            {
+                fclose(temp_in);
+                fclose(temp_out);
+                return -EIO;
+            }
+
+            // Read decrypted content
+            rewind(temp_out);
+            fseek(temp_out, 0, SEEK_END);
+            long dec_size = ftell(temp_out);
+            rewind(temp_out);
+
+            char *decrypted_content = malloc(dec_size + size);
+            if (!decrypted_content)
+            {
+                fclose(temp_in);
+                fclose(temp_out);
+                return -ENOMEM;
+            }
+
+            if (fread(decrypted_content, 1, dec_size, temp_out) != dec_size)
+            {
+                free(decrypted_content);
+                fclose(temp_in);
+                fclose(temp_out);
+                return -EIO;
+            }
+
+            fclose(temp_in);
+            fclose(temp_out);
+
+            // Append new data
+            memcpy(decrypted_content + dec_size, buf, size);
+
+            // Re-encrypt everything
+            temp_in = tmpfile();
+            temp_out = tmpfile();
+
+            if (!temp_in || !temp_out)
+            {
+                free(decrypted_content);
+                if (temp_in)
+                    fclose(temp_in);
+                if (temp_out)
+                    fclose(temp_out);
+                return -EIO;
+            }
+
+            fwrite(decrypted_content, 1, dec_size + size, temp_in);
+            rewind(temp_in);
+            free(decrypted_content);
+
+            if (!encrypt_file(temp_in, temp_out, ROOT_DIR->passphrase))
+            {
+                fclose(temp_in);
+                fclose(temp_out);
+                return -EIO;
+            }
+
+            // Get final encrypted size
+            rewind(temp_out);
+            fseek(temp_out, 0, SEEK_END);
+            long new_size = ftell(temp_out);
+            rewind(temp_out);
+
+            unsigned char *new_encrypted = malloc(new_size);
+            if (!new_encrypted)
+            {
+                fclose(temp_in);
+                fclose(temp_out);
+                return -ENOMEM;
+            }
+
+            if (fread(new_encrypted, 1, new_size, temp_out) != new_size)
+            {
+                free(new_encrypted);
+                fclose(temp_in);
+                fclose(temp_out);
+                return -EIO;
+            }
+
+            fclose(temp_in);
+            fclose(temp_out);
+
+            // Write to file, overwriting completely
+            fd = open(fpath, O_WRONLY | O_TRUNC);
+            if (fd == -1)
+            {
+                free(new_encrypted);
+                return -errno;
+            }
+
+            res = write(fd, new_encrypted, new_size);
+            free(new_encrypted);
         }
         else
         {
-            get_file_iv(fpath, iv);
-        }
+            // Normal encrypted write (not an append)
+            FILE *input_tmp = tmpfile();
+            FILE *output_tmp = tmpfile();
+            if (!input_tmp || !output_tmp)
+            {
+                if (input_tmp)
+                    fclose(input_tmp);
+                if (output_tmp)
+                    fclose(output_tmp);
+                return -EIO;
+            }
 
-        // Create temporary files for encryption
-        FILE *input_tmp = tmpfile();
-        FILE *output_tmp = tmpfile();
-        if (!input_tmp || !output_tmp)
-        {
-            if (input_tmp)
+            fwrite(buf, 1, size, input_tmp);
+            rewind(input_tmp);
+
+            if (!encrypt_file(input_tmp, output_tmp, ROOT_DIR->passphrase))
+            {
                 fclose(input_tmp);
-            if (output_tmp)
                 fclose(output_tmp);
-            return -EIO;
-        }
+                return -EIO;
+            }
 
-        // Write plaintext data to temp file
-        fwrite(buf, 1, size, input_tmp);
-        rewind(input_tmp);
+            rewind(output_tmp);
+            fseek(output_tmp, 0, SEEK_END);
+            long encrypted_size = ftell(output_tmp);
+            rewind(output_tmp);
 
-        // Encrypt the data
-        if (!encrypt_file(input_tmp, output_tmp, ROOT_DIR->passphrase))
-        {
+            unsigned char *encrypted_buf = malloc(encrypted_size);
+            if (!encrypted_buf)
+            {
+                fclose(input_tmp);
+                fclose(output_tmp);
+                return -ENOMEM;
+            }
+
+            if (fread(encrypted_buf, 1, encrypted_size, output_tmp) != encrypted_size)
+            {
+                free(encrypted_buf);
+                fclose(input_tmp);
+                fclose(output_tmp);
+                return -EIO;
+            }
+
             fclose(input_tmp);
             fclose(output_tmp);
-            return -EIO;
-        }
 
-        // Get the encrypted data
-        unsigned char *encrypted_buf = malloc(size + EVP_MAX_BLOCK_LENGTH);
-        if (!encrypted_buf)
-        {
-            fclose(input_tmp);
-            fclose(output_tmp);
-            return -ENOMEM;
-        }
+            fd = open(fpath, O_WRONLY);
+            if (fd == -1)
+            {
+                free(encrypted_buf);
+                return -errno;
+            }
 
-        rewind(output_tmp);
-        int encrypted_size = fread(encrypted_buf, 1, size + EVP_MAX_BLOCK_LENGTH, output_tmp);
-
-        // Write the encrypted data
-        fd = open(fpath, O_WRONLY);
-        if (fd == -1)
-        {
+            res = pwrite(fd, encrypted_buf, encrypted_size, offset);
             free(encrypted_buf);
-            fclose(input_tmp);
-            fclose(output_tmp);
-            return -errno;
         }
-
-        res = pwrite(fd, encrypted_buf, encrypted_size, offset);
-
-        free(encrypted_buf);
-        fclose(input_tmp);
-        fclose(output_tmp);
     }
     else
     {
-        // Not encrypting, just write directly
+        // Not encrypted, just write directly
         fd = open(fpath, O_WRONLY);
         if (fd == -1)
             return -errno;
@@ -481,160 +646,6 @@ static int xmp_release(const char *path, struct fuse_file_info *fi)
     (void)path;
     (void)fi;
     return 0;
-}
-
-static int xmp_append(const char *path, const char *buf, size_t size,
-                      struct fuse_file_info *fi)
-{
-    int fd;
-    int res;
-    char fpath[PATH_MAX_LENGTH];
-    fullpath(fpath, path);
-
-    // Check if we should encrypt this file
-    if (should_encrypt_file(fpath))
-    {
-        // For encrypted files, we need to:
-        // 1. Read the entire file
-        // 2. Decrypt it
-        // 3. Append new data
-        // 4. Re-encrypt the whole thing
-
-        // Get file size
-        struct stat st;
-        if (lstat(fpath, &st) == -1)
-            return -errno;
-
-        // Read the existing encrypted content
-        unsigned char *encrypted_content = malloc(st.st_size);
-        if (!encrypted_content)
-            return -ENOMEM;
-
-        fd = open(fpath, O_RDONLY);
-        if (fd == -1)
-        {
-            free(encrypted_content);
-            return -errno;
-        }
-
-        ssize_t bytes_read = read(fd, encrypted_content, st.st_size);
-        close(fd);
-
-        if (bytes_read != st.st_size)
-        {
-            free(encrypted_content);
-            return -EIO;
-        }
-
-        // Decrypt the content
-        FILE *temp_in = tmpfile();
-        FILE *temp_out = tmpfile();
-        if (!temp_in || !temp_out)
-        {
-            free(encrypted_content);
-            if (temp_in)
-                fclose(temp_in);
-            if (temp_out)
-                fclose(temp_out);
-            return -EIO;
-        }
-
-        fwrite(encrypted_content, 1, bytes_read, temp_in);
-        rewind(temp_in);
-        free(encrypted_content);
-
-        if (!decrypt_file(temp_in, temp_out, ROOT_DIR->passphrase))
-        {
-            fclose(temp_in);
-            fclose(temp_out);
-            return -EIO;
-        }
-
-        // Read decrypted content
-        rewind(temp_out);
-        char *decrypted_content = malloc(st.st_size + size); // Space for original + new
-        if (!decrypted_content)
-        {
-            fclose(temp_in);
-            fclose(temp_out);
-            return -ENOMEM;
-        }
-
-        size_t dec_size = fread(decrypted_content, 1, st.st_size, temp_out);
-        fclose(temp_in);
-        fclose(temp_out);
-
-        // Append new data
-        memcpy(decrypted_content + dec_size, buf, size);
-
-        // Re-encrypt everything
-        temp_in = tmpfile();
-        temp_out = tmpfile();
-        if (!temp_in || !temp_out)
-        {
-            free(decrypted_content);
-            if (temp_in)
-                fclose(temp_in);
-            if (temp_out)
-                fclose(temp_out);
-            return -EIO;
-        }
-
-        fwrite(decrypted_content, 1, dec_size + size, temp_in);
-        rewind(temp_in);
-        free(decrypted_content);
-
-        if (!encrypt_file(temp_in, temp_out, ROOT_DIR->passphrase))
-        {
-            fclose(temp_in);
-            fclose(temp_out);
-            return -EIO;
-        }
-
-        // Write new encrypted content
-        rewind(temp_out);
-        fseek(temp_out, 0, SEEK_END);
-        long new_size = ftell(temp_out);
-        rewind(temp_out);
-
-        unsigned char *new_encrypted = malloc(new_size);
-        if (!new_encrypted)
-        {
-            fclose(temp_in);
-            fclose(temp_out);
-            return -ENOMEM;
-        }
-
-        size_t enc_bytes_read = fread(new_encrypted, 1, new_size, temp_out);
-        fclose(temp_in);
-        fclose(temp_out);
-
-        // Write to file
-        fd = open(fpath, O_WRONLY | O_TRUNC);
-        if (fd == -1)
-        {
-            free(new_encrypted);
-            return -errno;
-        }
-
-        res = write(fd, new_encrypted, enc_bytes_read);
-        free(new_encrypted);
-    }
-    else
-    {
-        // Not encrypting, use normal append
-        fd = open(fpath, O_WRONLY | O_APPEND);
-        if (fd == -1)
-            return -errno;
-
-        res = write(fd, buf, size);
-    }
-
-    if (res == -1)
-        res = -errno;
-
-    close(fd);
-    return res;
 }
 
 static struct fuse_operations xmp_oper = {
