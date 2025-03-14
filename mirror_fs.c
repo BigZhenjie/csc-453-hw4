@@ -837,6 +837,38 @@ static int xmp_release(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+static int xmp_symlink(const char *from, const char *to)
+{
+    int res;
+    char fpath_from[PATH_MAX_LENGTH];
+    char fpath_to[PATH_MAX_LENGTH];
+    
+    fullpath(fpath_from, from);
+    fullpath(fpath_to, to);
+
+    res = symlink(fpath_from, fpath_to);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
+static int xmp_link(const char *from, const char *to)
+{
+    int res;
+    char fpath_from[PATH_MAX_LENGTH];
+    char fpath_to[PATH_MAX_LENGTH];
+    
+    fullpath(fpath_from, from);
+    fullpath(fpath_to, to);
+
+    res = link(fpath_from, fpath_to);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
 static struct fuse_operations xmp_oper = {
     .getattr = xmp_getattr, // Most important!
     .readdir = xmp_readdir,
@@ -853,6 +885,8 @@ static struct fuse_operations xmp_oper = {
     .write = xmp_write,
     .release = xmp_release,
     .utimens = xmp_utimens, // Important for timestamp updates
+    .symlink = xmp_symlink,
+    .link = xmp_link,
 };
 
 int main(int argc, char *argv[])
