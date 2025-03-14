@@ -869,6 +869,53 @@ static int xmp_link(const char *from, const char *to)
     return 0;
 }
 
+static int xmp_access(const char *path, int mask)
+{
+    int res;
+    char fpath[PATH_MAX_LENGTH];
+    fullpath(fpath, path);
+
+    res = access(fpath, mask);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
+static int xmp_readlink(const char *path, char *buf, size_t size)
+{
+    int res;
+    char fpath[PATH_MAX_LENGTH];
+    fullpath(fpath, path);
+
+    res = readlink(fpath, buf, size - 1);
+    if (res == -1)
+        return -errno;
+
+    buf[res] = '\0';
+    return 0;
+}
+
+static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
+{
+    int res;
+
+    /* On Linux this could just be 'mknod(path, mode, rdev)' but this
+       is more portable */
+    if (S_ISREG(mode)) {
+        res = open(path, O_CREAT | O_EXCL | O_WRONLY, mode);
+        if (res >= 0)
+            res = close(res);
+    } else if (S_ISFIFO(mode))
+        res = mkfifo(path, mode);
+    else
+        res = mknod(path, mode, rdev);
+    if (res == -1)
+        return -errno;
+
+    return 0;
+}
+
 static struct fuse_operations xmp_oper = {
     .getattr = xmp_getattr, // Most important!
     .readdir = xmp_readdir,
@@ -887,6 +934,9 @@ static struct fuse_operations xmp_oper = {
     .utimens = xmp_utimens, // Important for timestamp updates
     .symlink = xmp_symlink,
     .link = xmp_link,
+    .access = xmp_access,
+    .readlink = xmp_readlink,
+    .mknod = xmp_mknod,
 };
 
 int main(int argc, char *argv[])
